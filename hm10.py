@@ -34,7 +34,7 @@ def extract_corners_and_descriptors(image):
     # Aplicar un filtro Gaussiano para suavizar la imagen
     image = cv.GaussianBlur(image, (7, 7), 0)
     gray = cv.cvtColor(image, cv.COLOR_BGR2GRAY)
-    harris_corners = cv.cornerHarris(gray, 2, 3, 0.05)
+    harris_corners = cv.cornerHarris(gray, 15, 11, 0.04)
     threshold = 0.10 * harris_corners.max()  # Aumentar el umbral
     corner_positions = np.argwhere(harris_corners > threshold)
     keypoints = [cv.KeyPoint(float(x[1]), float(x[0]), 5) for x in corner_positions]
@@ -76,7 +76,7 @@ def draw_matches(img1, kp1, des1, img2, kp2, des2):
         dst_pts = np.float32([kp2[m.trainIdx].pt for m in good_matches]).reshape(-1, 1, 2)
 
         # Estimar la homografía con RANSAC
-        M, mask = cv.findHomography(src_pts, dst_pts, cv.RANSAC, 7.0)
+        M, mask = cv.findHomography(src_pts, dst_pts, cv.RANSAC, 20.0)
         matchesMask = mask.ravel().tolist()
 
         # Dibujar solo los matches que son inliers
@@ -101,40 +101,56 @@ def initialize_capture(video_path):
     fps = cap.get(cv.CAP_PROP_FPS)
     return cap, fps
 
-def process_frame(frame, resize_percent, reference_img_resized, ref_kp, ref_des, last_quadrant, quadrant_times):
+def process_frame(frame, resize_percent, reference_img_resized, ref_kp, ref_des, last_quadrant, quadrant_times, previous_centroid):
     frame_resized = resize_image(frame, resize_percent)
     kp, des, corner_positions = extract_corners_and_descriptors(frame_resized)
     if kp:
-        centroid = calculate_centroid(kp)
-        if centroid:
-            x, y = int(centroid[0]), int(centroid[1])
+        current_centroid = calculate_centroid(kp)
+        if current_centroid:
+            print(f"Original Centroid: {current_centroid}")  # Debugging
+            limited_centroid = limit_centroid_movement(current_centroid, previous_centroid, max_distance=10)
+            print(f"Limited Centroid: {limited_centroid}")  # Debugging
+            previous_centroid = limited_centroid  # Actualizar el último centroide
+            x, y = int(limited_centroid[0]), int(limited_centroid[1])
             cv.circle(frame_resized, (x, y), 5, (255, 0, 0), -1)
-            quadrant = determine_quadrant(centroid, frame_resized.shape[1], frame_resized.shape[0])
+            quadrant = determine_quadrant(limited_centroid, frame_resized.shape[1], frame_resized.shape[0])
             if quadrant != last_quadrant:
                 quadrant_times[quadrant]['count'] += 1
                 last_quadrant = quadrant
             quadrant_times[quadrant]['time'] += 1
     draw_lines(frame_resized)
     matched_img = draw_matches(frame_resized, kp, des, reference_img_resized, ref_kp, ref_des)
-    return matched_img, last_quadrant
+    return matched_img, last_quadrant, previous_centroid
 
 def draw_lines(frame):
     height, width = frame.shape[:2]
     cv.line(frame, (0, height), (width, 0), (0, 255, 0), 2)
     cv.line(frame, (width // 2, 0), (width // 2, height), (255, 255, 0), 2)
 
+def limit_centroid_movement(current_centroid, previous_centroid, max_distance=20):
+    if previous_centroid is None or current_centroid is None:
+        return current_centroid
+    distance = np.sqrt((current_centroid[0] - previous_centroid[0])**2 + (current_centroid[1] - previous_centroid[1])**2)
+    if distance > max_distance:
+        direction = ((current_centroid[0] - previous_centroid[0]), (current_centroid[1] - previous_centroid[1]))
+        norm_direction = (direction[0] / distance, direction[1] / distance)
+        limited_centroid = (previous_centroid[0] + norm_direction[0] * max_distance, previous_centroid[1] + norm_direction[1] * max_distance)
+        return limited_centroid
+    return current_centroid
+
 def main_loop(video_path, reference_img, resize_percent):
     cap, fps = initialize_capture(video_path)
     reference_img_resized = resize_image(reference_img, resize_percent)
-    ref_kp, ref_des, ref_corner_positions = extract_corners_and_descriptors(reference_img_resized)
+    ref_kp, ref_des, _ = extract_corners_and_descriptors(reference_img_resized)
     quadrant_times = {1: {'time': 0, 'count': 0}, 2: {'time': 0, 'count': 0}, 3: {'time': 0, 'count': 0}, 4: {'time': 0, 'count': 0}}
     last_quadrant = None
+    previous_centroid = None  # Guardar el último centroide para la restricción de movimiento
 
     while True:
         ret, frame = cap.read()
         if not ret:
             break
-        matched_img, last_quadrant = process_frame(frame, resize_percent, reference_img_resized, ref_kp, ref_des, last_quadrant, quadrant_times)
+        matched_img, last_quadrant, previous_centroid = process_frame(frame, resize_percent, reference_img_resized, ref_kp, ref_des, last_quadrant, quadrant_times, previous_centroid)
         cv.imshow('Real-time Feature Matching', matched_img)
         if cv.waitKey(1) & 0xFF == ord('q'):
             break
